@@ -20,10 +20,44 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json());
 
-// MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/ai-recruiter', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
+// MongoDB Connection with proper error handling
+const connectDB = async () => {
+  try {
+    const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/ai-recruiter';
+    console.log('Attempting to connect to MongoDB...');
+    
+    await mongoose.connect(mongoUri, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
+    
+    console.log('✅ MongoDB connected successfully');
+  } catch (error) {
+    console.error('❌ MongoDB connection failed:', error.message);
+    console.log('\n🔧 To fix this issue:');
+    console.log('1. Make sure MongoDB is running locally, or');
+    console.log('2. Set MONGODB_URI in your .env file to a valid MongoDB connection string');
+    console.log('3. For local development, you can install and start MongoDB:');
+    console.log('   - Install: https://docs.mongodb.com/manual/installation/');
+    console.log('   - Start: mongod --dbpath /path/to/your/db');
+    console.log('\n⚠️  The application will continue running but database features will not work.\n');
+  }
+};
+
+// Connect to database
+connectDB();
+
+// Handle MongoDB connection events
+mongoose.connection.on('connected', () => {
+  console.log('Mongoose connected to MongoDB');
+});
+
+mongoose.connection.on('error', (err) => {
+  console.error('Mongoose connection error:', err);
+});
+
+mongoose.connection.on('disconnected', () => {
+  console.log('Mongoose disconnected from MongoDB');
 });
 
 // Conversation Schema
@@ -65,8 +99,20 @@ io.on('connection', (socket) => {
   });
 });
 
+// Middleware to check database connection
+const checkDBConnection = (req, res, next) => {
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(503).json({
+      success: false,
+      error: 'Database not available',
+      message: 'MongoDB connection is not established. Please check your database configuration.'
+    });
+  }
+  next();
+};
+
 // Start a new call with Vapi.AI
-app.post('/api/calls/start', async (req, res) => {
+app.post('/api/calls/start', checkDBConnection, async (req, res) => {
   try {
     const { candidateName, candidatePhone, position } = req.body;
     
@@ -138,7 +184,7 @@ app.post('/api/calls/start', async (req, res) => {
 });
 
 // End a call
-app.post('/api/calls/:callId/end', async (req, res) => {
+app.post('/api/calls/:callId/end', checkDBConnection, async (req, res) => {
   try {
     const { callId } = req.params;
     
@@ -196,10 +242,12 @@ app.post('/api/vapi/webhook', async (req, res) => {
           timestamp: new Date()
         };
 
-        // Save to database
-        await Conversation.findByIdAndUpdate(activeCall.conversationId, {
-          $push: { transcript: transcript }
-        });
+        // Save to database (only if connected)
+        if (mongoose.connection.readyState === 1) {
+          await Conversation.findByIdAndUpdate(activeCall.conversationId, {
+            $push: { transcript: transcript }
+          });
+        }
 
         // Broadcast to frontend
         io.to(callId).emit('transcript-update', transcript);
@@ -210,20 +258,22 @@ app.post('/api/vapi/webhook', async (req, res) => {
         break;
 
       case 'call-ended':
-        // Update conversation
-        const conversation = await Conversation.findByIdAndUpdate(
-          activeCall.conversationId,
-          {
-            status: 'completed',
-            endTime: new Date(),
-            summary: 'Interview completed successfully'
-          },
-          { new: true }
-        );
+        // Update conversation (only if connected)
+        if (mongoose.connection.readyState === 1) {
+          const conversation = await Conversation.findByIdAndUpdate(
+            activeCall.conversationId,
+            {
+              status: 'completed',
+              endTime: new Date(),
+              summary: 'Interview completed successfully'
+            },
+            { new: true }
+          );
 
-        if (conversation) {
-          conversation.duration = Math.round((conversation.endTime - conversation.startTime) / 1000);
-          await conversation.save();
+          if (conversation) {
+            conversation.duration = Math.round((conversation.endTime - conversation.startTime) / 1000);
+            await conversation.save();
+          }
         }
 
         // Clean up and notify
@@ -252,7 +302,7 @@ app.post('/api/vapi/webhook', async (req, res) => {
 });
 
 // Get conversation history
-app.get('/api/conversations', async (req, res) => {
+app.get('/api/conversations', checkDBConnection, async (req, res) => {
   try {
     const conversations = await Conversation.find()
       .sort({ startTime: -1 })
@@ -266,7 +316,7 @@ app.get('/api/conversations', async (req, res) => {
 });
 
 // Get specific conversation with full transcript
-app.get('/api/conversations/:id', async (req, res) => {
+app.get('/api/conversations/:id', checkDBConnection, async (req, res) => {
   try {
     const conversation = await Conversation.findById(req.params.id);
     if (!conversation) {
@@ -280,7 +330,7 @@ app.get('/api/conversations/:id', async (req, res) => {
 });
 
 // Get call status
-app.get('/api/calls/:callId/status', async (req, res) => {
+app.get('/api/calls/:callId/status', checkDBConnection, async (req, res) => {
   try {
     const { callId } = req.params;
     const conversation = await Conversation.findOne({ callId });
@@ -296,11 +346,26 @@ app.get('/api/calls/:callId/status', async (req, res) => {
   }
 });
 
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
+  res.json({
+    status: 'ok',
+    database: dbStatus,
+    timestamp: new Date().toISOString()
+  });
+});
+
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log('Make sure to set your environment variables:');
-  console.log('- VAPI_API_KEY');
-  console.log('- VAPI_PHONE_NUMBER_ID');
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
+  console.log('\n📋 Environment variables needed:');
+  console.log('- VAPI_API_KEY (required for voice calls)');
+  console.log('- VAPI_PHONE_NUMBER_ID (required for voice calls)');
   console.log('- MONGODB_URI (optional, defaults to localhost)');
+  
+  if (!process.env.MONGODB_URI) {
+    console.log('\n💡 Tip: Set MONGODB_URI in your .env file for a custom database connection');
+  }
 });
