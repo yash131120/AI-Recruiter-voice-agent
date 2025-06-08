@@ -12,61 +12,106 @@ import {
   Clock,
   Activity
 } from 'lucide-react';
+import { apiService, Conversation } from '../services/api';
+import { socketService, TranscriptMessage } from '../services/socket';
+import VoiceWaveform from '../components/VoiceWaveform';
 
 const InterviewCall = () => {
   const { id } = useParams();
   const navigate = useNavigate();
-  const [isCallActive, setIsCallActive] = useState(true);
+  const [conversation, setConversation] = useState<Conversation | null>(null);
+  const [isCallActive, setIsCallActive] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isSpeakerOn, setIsSpeakerOn] = useState(true);
   const [callDuration, setCallDuration] = useState(0);
   const [aiSpeaking, setAiSpeaking] = useState(false);
   const [userSpeaking, setUserSpeaking] = useState(false);
+  const [transcript, setTranscript] = useState<TranscriptMessage[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
-  // Mock conversation data
-  const [conversation, setConversation] = useState([
-    {
-      speaker: 'ai',
-      text: "Hello! I'm your AI interviewer. Thank you for joining today's interview session. Could you please introduce yourself?",
-      timestamp: new Date()
-    }
-  ]);
-
-  const [currentAiText, setCurrentAiText] = useState('');
-  const [currentUserText, setCurrentUserText] = useState('');
-
-  // Mock real-time transcription effect
   useEffect(() => {
-    const interval = setInterval(() => {
-      if (isCallActive) {
-        setCallDuration(prev => prev + 1);
-      }
-    }, 1000);
+    if (id) {
+      loadConversation();
+      setupSocketConnection();
+    }
 
-    return () => clearInterval(interval);
+    return () => {
+      socketService.disconnect();
+    };
+  }, [id]);
+
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (isCallActive) {
+      interval = setInterval(() => {
+        setCallDuration(prev => prev + 1);
+      }, 1000);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
   }, [isCallActive]);
 
-  // Simulate AI speaking and transcription
-  useEffect(() => {
-    if (isCallActive && conversation.length === 1) {
-      const timer = setTimeout(() => {
-        setAiSpeaking(true);
-        setCurrentAiText("That's great! I can see you have a strong background in software development. Let me ask you about your experience with...");
-        
-        setTimeout(() => {
-          setAiSpeaking(false);
-          setConversation(prev => [...prev, {
-            speaker: 'ai',
-            text: "That's great! I can see you have a strong background in software development. Let me ask you about your experience with React and modern JavaScript frameworks.",
-            timestamp: new Date()
-          }]);
-          setCurrentAiText('');
-        }, 3000);
-      }, 5000);
-
-      return () => clearTimeout(timer);
+  const loadConversation = async () => {
+    try {
+      const data = await apiService.getConversation(id!);
+      setConversation(data);
+      setTranscript(data.transcript || []);
+      setIsCallActive(data.status === 'active' || data.status === 'starting');
+      
+      if (data.startTime) {
+        const startTime = new Date(data.startTime).getTime();
+        const now = Date.now();
+        const elapsed = Math.floor((now - startTime) / 1000);
+        setCallDuration(elapsed > 0 ? elapsed : 0);
+      }
+    } catch (error) {
+      console.error('Error loading conversation:', error);
+      setError('Failed to load conversation');
+    } finally {
+      setLoading(false);
     }
-  }, [isCallActive, conversation.length]);
+  };
+
+  const setupSocketConnection = () => {
+    const socket = socketService.connect();
+    
+    if (conversation?.callId) {
+      socketService.joinCall(conversation.callId);
+    }
+
+    socketService.on('transcript-update', (message: TranscriptMessage) => {
+      setTranscript(prev => [...prev, message]);
+    });
+
+    socketService.on('call-started', () => {
+      setIsCallActive(true);
+    });
+
+    socketService.on('call-ended', () => {
+      setIsCallActive(false);
+      setTimeout(() => {
+        navigate('/dashboard');
+      }, 2000);
+    });
+
+    socketService.on('speech-started', (data) => {
+      if (data.speaker === 'ai') {
+        setAiSpeaking(true);
+      } else {
+        setUserSpeaking(true);
+      }
+    });
+
+    socketService.on('speech-ended', (data) => {
+      if (data.speaker === 'ai') {
+        setAiSpeaking(false);
+      } else {
+        setUserSpeaking(false);
+      }
+    });
+  };
 
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -74,31 +119,50 @@ const InterviewCall = () => {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  const handleEndCall = () => {
+  const handleEndCall = async () => {
+    if (conversation?.callId) {
+      try {
+        await apiService.endCall(conversation.callId);
+      } catch (error) {
+        console.error('Error ending call:', error);
+      }
+    }
     setIsCallActive(false);
     setTimeout(() => {
       navigate('/dashboard');
     }, 2000);
   };
 
-  const WaveformAnimation = ({ isActive }: { isActive: boolean }) => (
-    <div className="flex items-center space-x-1 h-8">
-      {[...Array(5)].map((_, i) => (
-        <div
-          key={i}
-          className={`w-1 bg-current rounded-full transition-all duration-300 ${
-            isActive 
-              ? 'animate-pulse' 
-              : 'h-2'
-          }`}
-          style={{
-            height: isActive ? `${Math.random() * 20 + 10}px` : '8px',
-            animationDelay: `${i * 0.1}s`
-          }}
-        />
-      ))}
-    </div>
-  );
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-purple-50 via-blue-50 to-indigo-100 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin w-8 h-8 border-2 border-purple-600 border-t-transparent rounded-full mx-auto mb-4"></div>
+          <p className="text-gray-600">Loading interview...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-purple-50 via-blue-50 to-indigo-100 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-20 h-20 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-6">
+            <PhoneOff className="h-10 w-10 text-red-600" />
+          </div>
+          <h2 className="text-2xl font-bold text-gray-900 mb-2">Error</h2>
+          <p className="text-gray-600 mb-4">{error}</p>
+          <button
+            onClick={() => navigate('/dashboard')}
+            className="bg-purple-600 text-white px-6 py-2 rounded-lg hover:bg-purple-700 transition-colors"
+          >
+            Back to Dashboard
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (!isCallActive) {
     return (
@@ -124,7 +188,7 @@ const InterviewCall = () => {
             <Bot className="h-8 w-8 text-purple-600" />
             <div>
               <h1 className="text-xl font-bold text-gray-900">AI Voice Interview Session</h1>
-              <p className="text-gray-600">Frontend Developer Position</p>
+              <p className="text-gray-600">{conversation?.position} Position</p>
             </div>
           </div>
           
@@ -156,26 +220,25 @@ const InterviewCall = () => {
               </div>
               <div className="ml-auto">
                 <div className={`text-purple-600 ${aiSpeaking ? 'opacity-100' : 'opacity-30'}`}>
-                  <WaveformAnimation isActive={aiSpeaking} />
+                  <VoiceWaveform isActive={aiSpeaking} />
                 </div>
               </div>
             </div>
 
             <div className="space-y-4 max-h-64 overflow-y-auto">
-              {conversation.filter(msg => msg.speaker === 'ai').map((msg, index) => (
+              {transcript.filter(msg => msg.speaker === 'ai').map((msg, index) => (
                 <div key={index} className="bg-purple-50 rounded-lg p-4">
                   <p className="text-gray-800">{msg.text}</p>
                   <span className="text-xs text-gray-500 mt-2 block">
-                    {msg.timestamp.toLocaleTimeString()}
+                    {new Date(msg.timestamp).toLocaleTimeString()}
                   </span>
                 </div>
               ))}
-              {currentAiText && (
+              {aiSpeaking && (
                 <div className="bg-purple-50 rounded-lg p-4 border-2 border-purple-200 animate-pulse">
-                  <p className="text-gray-800">{currentAiText}</p>
-                  <div className="flex items-center space-x-2 mt-2">
+                  <div className="flex items-center space-x-2">
                     <Activity className="h-4 w-4 text-purple-600 animate-pulse" />
-                    <span className="text-xs text-purple-600">Live transcription...</span>
+                    <span className="text-sm text-purple-600">AI is speaking...</span>
                   </div>
                 </div>
               )}
@@ -190,56 +253,38 @@ const InterviewCall = () => {
               </div>
               <div>
                 <h3 className="text-lg font-semibold text-gray-900">Candidate</h3>
-                <p className="text-gray-600">Alice Johnson</p>
+                <p className="text-gray-600">{conversation?.candidateName}</p>
               </div>
               <div className="ml-auto">
                 <div className={`text-blue-600 ${userSpeaking ? 'opacity-100' : 'opacity-30'}`}>
-                  <WaveformAnimation isActive={userSpeaking} />
+                  <VoiceWaveform isActive={userSpeaking} />
                 </div>
               </div>
             </div>
 
             <div className="space-y-4 max-h-64 overflow-y-auto">
-              {conversation.filter(msg => msg.speaker === 'user').map((msg, index) => (
+              {transcript.filter(msg => msg.speaker === 'user').map((msg, index) => (
                 <div key={index} className="bg-blue-50 rounded-lg p-4">
                   <p className="text-gray-800">{msg.text}</p>
                   <span className="text-xs text-gray-500 mt-2 block">
-                    {msg.timestamp.toLocaleTimeString()}
+                    {new Date(msg.timestamp).toLocaleTimeString()}
                   </span>
                 </div>
               ))}
-              {currentUserText && (
+              {userSpeaking && (
                 <div className="bg-blue-50 rounded-lg p-4 border-2 border-blue-200 animate-pulse">
-                  <p className="text-gray-800">{currentUserText}</p>
-                  <div className="flex items-center space-x-2 mt-2">
+                  <div className="flex items-center space-x-2">
                     <Activity className="h-4 w-4 text-blue-600 animate-pulse" />
-                    <span className="text-xs text-blue-600">Live transcription...</span>
+                    <span className="text-sm text-blue-600">Candidate is speaking...</span>
                   </div>
                 </div>
               )}
               
-              {/* Placeholder for user to start speaking */}
-              <div className="bg-gray-50 rounded-lg p-4 text-center">
-                <p className="text-gray-500 italic">Waiting for your response...</p>
-                <button 
-                  onClick={() => {
-                    setUserSpeaking(true);
-                    setCurrentUserText("Hi! I'm Alice Johnson, a frontend developer with 5 years of experience. I specialize in React, TypeScript, and modern web technologies...");
-                    setTimeout(() => {
-                      setUserSpeaking(false);
-                      setConversation(prev => [...prev, {
-                        speaker: 'user',
-                        text: "Hi! I'm Alice Johnson, a frontend developer with 5 years of experience. I specialize in React, TypeScript, and modern web technologies. I'm passionate about creating intuitive user experiences.",
-                        timestamp: new Date()
-                      }]);
-                      setCurrentUserText('');
-                    }, 4000);
-                  }}
-                  className="mt-2 text-blue-600 hover:text-blue-700 text-sm font-medium"
-                >
-                  Click to simulate response
-                </button>
-              </div>
+              {transcript.filter(msg => msg.speaker === 'user').length === 0 && !userSpeaking && (
+                <div className="bg-gray-50 rounded-lg p-4 text-center">
+                  <p className="text-gray-500 italic">Waiting for candidate response...</p>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -281,7 +326,7 @@ const InterviewCall = () => {
             <p className="text-gray-600">
               {isMuted && <span className="text-red-600 font-medium">Microphone muted • </span>}
               {!isSpeakerOn && <span className="text-red-600 font-medium">Speaker off • </span>}
-              Interview in progress
+              Interview in progress with {conversation?.candidateName}
             </p>
           </div>
         </div>
