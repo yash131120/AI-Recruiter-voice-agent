@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { 
   Bot, 
   Plus, 
@@ -18,6 +18,7 @@ import {
 import { apiService, Conversation } from '../services/api';
 
 const Dashboard = () => {
+  const navigate = useNavigate();
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState('all');
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -299,6 +300,7 @@ const StartInterviewModal: React.FC<{
   onClose: () => void;
   onSuccess: () => void;
 }> = ({ onClose, onSuccess }) => {
+  const navigate = useNavigate();
   const [formData, setFormData] = useState({
     candidateName: '',
     candidatePhone: '',
@@ -316,8 +318,8 @@ const StartInterviewModal: React.FC<{
       const response = await apiService.startCall(formData);
       if (response.success) {
         onSuccess();
-        // Optionally redirect to the interview page
-        window.location.href = `/interview/${response.conversationId}`;
+        // Navigate to the interview page immediately
+        navigate(`/interview/${response.conversationId}`);
       }
     } catch (err: any) {
       setError(err.response?.data?.error || 'Failed to start interview');
